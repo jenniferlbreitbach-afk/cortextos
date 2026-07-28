@@ -1,9 +1,12 @@
 import {
   PROVIDER_IDS,
   type FallbackPolicy,
+  type FallbackPolicyOverride,
   type GlobalProviderConfiguration,
   type ProviderErrorCategory,
   type ProviderId,
+  type ProviderModelMap,
+  type ProviderResolutionInput,
   type ProviderRetryPolicy,
   type ProviderRetryPolicyOverride,
   type ProviderScopeConfiguration,
@@ -13,17 +16,27 @@ import {
 
 export const DEFAULT_PROVIDER_ID: ProviderId = 'anthropic';
 
+export const MAX_PROVIDER_TASK_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
+export const MAX_PROVIDER_RETRIES = 10;
+export const MAX_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1_000;
+export const MAX_PROVIDER_BACKOFF_MULTIPLIER = 10;
+export const MAX_PROVIDER_FALLBACK_ATTEMPTS = 3;
+
+const EMPTY_ERROR_CATEGORIES: readonly ProviderErrorCategory[] = Object.freeze(
+  [] as ProviderErrorCategory[],
+);
+
 export const DEFAULT_RETRY_POLICY: Readonly<ProviderRetryPolicy> = Object.freeze({
   maxRetries: 0,
   initialDelayMs: 1_000,
   maxDelayMs: 30_000,
   backoffMultiplier: 2,
-  retryableCategories: [],
+  retryableCategories: EMPTY_ERROR_CATEGORIES,
 });
 
 export const DEFAULT_FALLBACK_POLICY: Readonly<FallbackPolicy> = Object.freeze({
   enabled: false,
-  on: [],
+  on: EMPTY_ERROR_CATEGORIES,
   maxAttempts: 0,
   requireSafeReplay: true,
 });
@@ -41,10 +54,12 @@ const ERROR_CATEGORIES: ReadonlySet<ProviderErrorCategory> = new Set([
   'unknown',
 ]);
 
-type ConfigurationErrorCode =
+export type ConfigurationErrorCode =
+  | 'INVALID_CONFIGURATION'
   | 'UNSUPPORTED_PROVIDER'
   | 'MULTIPLE_PROVIDERS_NOT_ALLOWED'
   | 'MISSING_MODEL'
+  | 'MISSING_FALLBACK_MODEL'
   | 'INVALID_MODEL'
   | 'INVALID_TIMEOUT'
   | 'INVALID_RETRY_POLICY'
@@ -70,6 +85,17 @@ export class ProviderConfigurationError
   }
 }
 
+export function validateProviderResolutionInput(value: unknown): ProviderResolutionInput {
+  const record = requirePlainRecord(value, 'provider configuration');
+
+  return {
+    routine: validateProviderScope(record.routine, 'routine'),
+    agent: validateProviderScope(record.agent, 'agent'),
+    global: validateGlobalProviderConfiguration(record.global),
+    legacyModel: normalizeModelValue(record.legacyModel, 'legacyModel'),
+  };
+}
+
 export function parseProviderId(value: unknown, fieldName: string): ProviderId | undefined {
   if (value === undefined) {
     return undefined;
@@ -93,70 +119,65 @@ export function parseProviderId(value: unknown, fieldName: string): ProviderId |
 }
 
 export function validateProviderScope(
-  value: ProviderScopeConfiguration | undefined,
+  value: unknown,
   scopeName: 'routine' | 'agent',
 ): ProviderScopeConfiguration | undefined {
   if (value === undefined) {
     return undefined;
   }
 
-  const provider = parseProviderId(
-    (value as { provider?: unknown }).provider,
-    `${scopeName}.provider`,
-  );
-
-  validateModels(value.models, `${scopeName}.models`);
-  validateTimeout(value.timeout, `${scopeName}.timeout`);
-  validateRetryOverride(value.retry, `${scopeName}.retry`);
-  validateFallbackOverride(value.fallback, `${scopeName}.fallback`);
+  const record = requirePlainRecord(value, scopeName);
 
   return {
-    ...value,
-    provider,
+    provider: parseProviderId(record.provider, `${scopeName}.provider`),
+    models: validateModels(record.models, `${scopeName}.models`),
+    timeout: validateTimeout(record.timeout, `${scopeName}.timeout`),
+    retry: validateRetryOverride(record.retry, `${scopeName}.retry`),
+    fallback: validateFallbackOverride(record.fallback, `${scopeName}.fallback`),
   };
 }
 
 export function validateGlobalProviderConfiguration(
-  value: GlobalProviderConfiguration | undefined,
+  value: unknown,
 ): GlobalProviderConfiguration | undefined {
   if (value === undefined) {
     return undefined;
   }
 
-  const defaultProvider = parseProviderId(
-    (value as { defaultProvider?: unknown }).defaultProvider,
-    'global.defaultProvider',
-  );
-
-  validateModels(value.models, 'global.models');
-  validateTimeout(value.timeout, 'global.timeout');
-  validateRetryOverride(value.retry, 'global.retry');
-  validateFallbackOverride(value.fallback, 'global.fallback');
+  const record = requirePlainRecord(value, 'global');
 
   return {
-    ...value,
-    defaultProvider,
+    defaultProvider: parseProviderId(record.defaultProvider, 'global.defaultProvider'),
+    models: validateModels(record.models, 'global.models'),
+    timeout: validateTimeout(record.timeout, 'global.timeout'),
+    retry: validateRetryOverride(record.retry, 'global.retry'),
+    fallback: validateFallbackOverride(record.fallback, 'global.fallback'),
   };
 }
 
-export function normalizeTimeout(
-  ...overrides: Array<ProviderTimeout | undefined>
-): ProviderTimeout {
-  const taskMs = firstDefined(overrides.map((override) => override?.taskMs));
+export function normalizeTimeout(...overrides: unknown[]): ProviderTimeout {
+  const validated = overrides.map((override, index) =>
+    validateTimeout(override, `timeout override ${index + 1}`));
+  const taskMs = firstDefined(validated.map((override) => override?.taskMs));
   return taskMs === undefined ? {} : { taskMs };
 }
 
 export function normalizeRetryPolicy(
-  globalOverride?: ProviderRetryPolicyOverride,
-  agentOverride?: ProviderRetryPolicyOverride,
-  routineOverride?: ProviderRetryPolicyOverride,
+  globalOverride?: unknown,
+  agentOverride?: unknown,
+  routineOverride?: unknown,
 ): ProviderRetryPolicy {
+  const overrides = [
+    validateRetryOverride(globalOverride, 'global.retry'),
+    validateRetryOverride(agentOverride, 'agent.retry'),
+    validateRetryOverride(routineOverride, 'routine.retry'),
+  ];
   const merged: ProviderRetryPolicy = {
     ...DEFAULT_RETRY_POLICY,
     retryableCategories: [...DEFAULT_RETRY_POLICY.retryableCategories],
   };
 
-  for (const override of [globalOverride, agentOverride, routineOverride]) {
+  for (const override of overrides) {
     if (!override) continue;
     if (override.maxRetries !== undefined) merged.maxRetries = override.maxRetries;
     if (override.initialDelayMs !== undefined) {
@@ -171,20 +192,32 @@ export function normalizeRetryPolicy(
     }
   }
 
+  if (merged.maxDelayMs < merged.initialDelayMs) {
+    throw new ProviderConfigurationError(
+      'INVALID_RETRY_POLICY',
+      'retry.maxDelayMs must be greater than or equal to retry.initialDelayMs',
+    );
+  }
+
   return merged;
 }
 
 export function normalizeFallbackPolicy(
-  globalOverride?: Partial<FallbackPolicy>,
-  agentOverride?: Partial<FallbackPolicy>,
-  routineOverride?: Partial<FallbackPolicy>,
+  globalOverride?: unknown,
+  agentOverride?: unknown,
+  routineOverride?: unknown,
 ): FallbackPolicy {
+  const overrides = [
+    validateFallbackOverride(globalOverride, 'global.fallback'),
+    validateFallbackOverride(agentOverride, 'agent.fallback'),
+    validateFallbackOverride(routineOverride, 'routine.fallback'),
+  ];
   const merged: FallbackPolicy = {
     ...DEFAULT_FALLBACK_POLICY,
     on: [...DEFAULT_FALLBACK_POLICY.on],
   };
 
-  for (const override of [globalOverride, agentOverride, routineOverride]) {
+  for (const override of overrides) {
     if (!override) continue;
     if (override.enabled !== undefined) merged.enabled = override.enabled;
     if (override.provider !== undefined) merged.provider = override.provider;
@@ -211,6 +244,14 @@ export function normalizeFallbackPolicy(
     );
   }
 
+  if (merged.on.length === 0) {
+    throw new ProviderConfigurationError(
+      'INVALID_FALLBACK_POLICY',
+      'Enabled fallback requires at least one trigger category',
+      merged.provider,
+    );
+  }
+
   if (merged.maxAttempts < 1) {
     throw new ProviderConfigurationError(
       'INVALID_FALLBACK_POLICY',
@@ -230,131 +271,265 @@ export function missingModelError(provider: ProviderId): ProviderConfigurationEr
   );
 }
 
-function validateModels(
-  models: ProviderScopeConfiguration['models'],
-  fieldName: string,
-): void {
-  if (models === undefined) return;
-  if (typeof models !== 'object' || models === null || Array.isArray(models)) {
-    throw new ProviderConfigurationError(
-      'INVALID_MODEL',
-      `${fieldName} must be an object keyed by provider ID`,
-    );
-  }
-
-  for (const [providerKey, config] of Object.entries(models)) {
-    const provider = parseProviderId(providerKey, `${fieldName} key`);
-    if (typeof config !== 'object' || config === null || Array.isArray(config)) {
-      throw new ProviderConfigurationError(
-        'INVALID_MODEL',
-        `${fieldName}.${provider} must be a model configuration object`,
-        provider,
-      );
-    }
-    if (typeof config.model !== 'string' || config.model.trim() === '') {
-      throw new ProviderConfigurationError(
-        'INVALID_MODEL',
-        `${fieldName}.${provider}.model must be a non-empty string`,
-        provider,
-      );
-    }
-  }
+export function missingFallbackModelError(
+  provider: ProviderId,
+): ProviderConfigurationError {
+  return new ProviderConfigurationError(
+    'MISSING_FALLBACK_MODEL',
+    `Fallback provider "${provider}" requires an explicit model configuration`,
+    provider,
+  );
 }
 
-function validateTimeout(timeout: ProviderTimeout | undefined, fieldName: string): void {
-  if (timeout?.taskMs === undefined) return;
-  if (!Number.isInteger(timeout.taskMs) || timeout.taskMs <= 0) {
-    throw new ProviderConfigurationError(
-      'INVALID_TIMEOUT',
-      `${fieldName}.taskMs must be a positive integer`,
+function validateModels(value: unknown, fieldName: string): ProviderModelMap | undefined {
+  if (value === undefined) return undefined;
+  const models = requirePlainRecord(value, fieldName, 'INVALID_MODEL');
+  const validated: ProviderModelMap = {};
+
+  for (const [providerKey, configValue] of Object.entries(models)) {
+    const provider = parseProviderId(providerKey, `${fieldName} key`);
+    if (provider === undefined) {
+      throw new ProviderConfigurationError(
+        'UNSUPPORTED_PROVIDER',
+        `${fieldName} contains an undefined provider key`,
+      );
+    }
+    const config = requirePlainRecord(
+      configValue,
+      `${fieldName}.${provider}`,
+      'INVALID_MODEL',
+      provider,
     );
+    const model = normalizeModelValue(
+      config.model,
+      `${fieldName}.${provider}.model`,
+      provider,
+    );
+    if (model === undefined) {
+      throw new ProviderConfigurationError(
+        'INVALID_MODEL',
+        `${fieldName}.${provider}.model is required`,
+        provider,
+      );
+    }
+    validated[provider] = { model };
   }
+
+  return validated;
+}
+
+function validateTimeout(value: unknown, fieldName: string): ProviderTimeout | undefined {
+  if (value === undefined) return undefined;
+  const timeout = requirePlainRecord(value, fieldName, 'INVALID_TIMEOUT');
+  if (timeout.taskMs === undefined) return {};
+
+  return {
+    taskMs: validateBoundedInteger(
+      timeout.taskMs,
+      `${fieldName}.taskMs`,
+      1,
+      MAX_PROVIDER_TASK_TIMEOUT_MS,
+      'INVALID_TIMEOUT',
+    ),
+  };
 }
 
 function validateRetryOverride(
-  retry: ProviderRetryPolicyOverride | undefined,
+  value: unknown,
   fieldName: string,
-): void {
-  if (!retry) return;
+): ProviderRetryPolicyOverride | undefined {
+  if (value === undefined) return undefined;
+  const retry = requirePlainRecord(value, fieldName, 'INVALID_RETRY_POLICY');
+  const validated: ProviderRetryPolicyOverride = {};
 
-  for (const [key, value] of [
-    ['maxRetries', retry.maxRetries],
-    ['initialDelayMs', retry.initialDelayMs],
-    ['maxDelayMs', retry.maxDelayMs],
-  ] as const) {
-    if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
-      throw new ProviderConfigurationError(
-        'INVALID_RETRY_POLICY',
-        `${fieldName}.${key} must be a non-negative integer`,
-      );
-    }
-  }
-
-  if (
-    retry.backoffMultiplier !== undefined
-    && (!Number.isFinite(retry.backoffMultiplier) || retry.backoffMultiplier < 1)
-  ) {
-    throw new ProviderConfigurationError(
+  if (retry.maxRetries !== undefined) {
+    validated.maxRetries = validateBoundedInteger(
+      retry.maxRetries,
+      `${fieldName}.maxRetries`,
+      0,
+      MAX_PROVIDER_RETRIES,
       'INVALID_RETRY_POLICY',
-      `${fieldName}.backoffMultiplier must be at least 1`,
+    );
+  }
+  if (retry.initialDelayMs !== undefined) {
+    validated.initialDelayMs = validateBoundedInteger(
+      retry.initialDelayMs,
+      `${fieldName}.initialDelayMs`,
+      0,
+      MAX_PROVIDER_RETRY_DELAY_MS,
+      'INVALID_RETRY_POLICY',
+    );
+  }
+  if (retry.maxDelayMs !== undefined) {
+    validated.maxDelayMs = validateBoundedInteger(
+      retry.maxDelayMs,
+      `${fieldName}.maxDelayMs`,
+      0,
+      MAX_PROVIDER_RETRY_DELAY_MS,
+      'INVALID_RETRY_POLICY',
+    );
+  }
+  if (retry.backoffMultiplier !== undefined) {
+    validated.backoffMultiplier = validateBoundedInteger(
+      retry.backoffMultiplier,
+      `${fieldName}.backoffMultiplier`,
+      1,
+      MAX_PROVIDER_BACKOFF_MULTIPLIER,
+      'INVALID_RETRY_POLICY',
+    );
+  }
+  if (retry.retryableCategories !== undefined) {
+    validated.retryableCategories = validateErrorCategories(
+      retry.retryableCategories,
+      `${fieldName}.retryableCategories`,
+      'INVALID_RETRY_POLICY',
     );
   }
 
   if (
-    retry.retryableCategories !== undefined
-    && (!Array.isArray(retry.retryableCategories)
-      || retry.retryableCategories.some((category) => !ERROR_CATEGORIES.has(category)))
+    validated.initialDelayMs !== undefined
+    && validated.maxDelayMs !== undefined
+    && validated.maxDelayMs < validated.initialDelayMs
   ) {
     throw new ProviderConfigurationError(
       'INVALID_RETRY_POLICY',
-      `${fieldName}.retryableCategories contains an unsupported error category`,
+      `${fieldName}.maxDelayMs must be greater than or equal to ${fieldName}.initialDelayMs`,
     );
   }
+
+  return validated;
 }
 
 function validateFallbackOverride(
-  fallback: Partial<FallbackPolicy> | undefined,
+  value: unknown,
   fieldName: string,
-): void {
-  if (!fallback) return;
+): FallbackPolicyOverride | undefined {
+  if (value === undefined) return undefined;
+  const fallback = requirePlainRecord(value, fieldName, 'INVALID_FALLBACK_POLICY');
+  const validated: FallbackPolicyOverride = {};
 
   if (fallback.provider !== undefined) {
-    parseProviderId(fallback.provider, `${fieldName}.provider`);
+    validated.provider = parseProviderId(fallback.provider, `${fieldName}.provider`);
   }
-  if (fallback.enabled !== undefined && typeof fallback.enabled !== 'boolean') {
-    throw new ProviderConfigurationError(
+  if (fallback.enabled !== undefined) {
+    if (typeof fallback.enabled !== 'boolean') {
+      throw new ProviderConfigurationError(
+        'INVALID_FALLBACK_POLICY',
+        `${fieldName}.enabled must be a boolean`,
+      );
+    }
+    validated.enabled = fallback.enabled;
+  }
+  if (fallback.maxAttempts !== undefined) {
+    validated.maxAttempts = validateBoundedInteger(
+      fallback.maxAttempts,
+      `${fieldName}.maxAttempts`,
+      0,
+      MAX_PROVIDER_FALLBACK_ATTEMPTS,
       'INVALID_FALLBACK_POLICY',
-      `${fieldName}.enabled must be a boolean`,
     );
   }
+  if (fallback.on !== undefined) {
+    validated.on = validateErrorCategories(
+      fallback.on,
+      `${fieldName}.on`,
+      'INVALID_FALLBACK_POLICY',
+    );
+  }
+  if (fallback.requireSafeReplay !== undefined) {
+    if (typeof fallback.requireSafeReplay !== 'boolean') {
+      throw new ProviderConfigurationError(
+        'INVALID_FALLBACK_POLICY',
+        `${fieldName}.requireSafeReplay must be a boolean`,
+      );
+    }
+    validated.requireSafeReplay = fallback.requireSafeReplay;
+  }
+
+  return validated;
+}
+
+function validateErrorCategories(
+  value: unknown,
+  fieldName: string,
+  code: 'INVALID_RETRY_POLICY' | 'INVALID_FALLBACK_POLICY',
+): readonly ProviderErrorCategory[] {
   if (
-    fallback.maxAttempts !== undefined
-    && (!Number.isInteger(fallback.maxAttempts) || fallback.maxAttempts < 0)
+    !Array.isArray(value)
+    || value.some((category) => typeof category !== 'string'
+      || !ERROR_CATEGORIES.has(category as ProviderErrorCategory))
   ) {
     throw new ProviderConfigurationError(
-      'INVALID_FALLBACK_POLICY',
-      `${fieldName}.maxAttempts must be a non-negative integer`,
+      code,
+      `${fieldName} contains an unsupported error category`,
     );
   }
+
+  return value.map((category) => category as ProviderErrorCategory);
+}
+
+function normalizeModelValue(
+  value: unknown,
+  fieldName: string,
+  provider?: ProviderId,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new ProviderConfigurationError(
+      'INVALID_MODEL',
+      `${fieldName} must be a non-empty string`,
+      provider,
+    );
+  }
+  return value.trim();
+}
+
+function validateBoundedInteger(
+  value: unknown,
+  fieldName: string,
+  minimum: number,
+  maximum: number,
+  code: 'INVALID_TIMEOUT' | 'INVALID_RETRY_POLICY' | 'INVALID_FALLBACK_POLICY',
+): number {
   if (
-    fallback.on !== undefined
-    && (!Array.isArray(fallback.on)
-      || fallback.on.some((category) => !ERROR_CATEGORIES.has(category)))
+    typeof value !== 'number'
+    || !Number.isFinite(value)
+    || !Number.isInteger(value)
+    || value < minimum
+    || value > maximum
   ) {
     throw new ProviderConfigurationError(
-      'INVALID_FALLBACK_POLICY',
-      `${fieldName}.on contains an unsupported error category`,
+      code,
+      `${fieldName} must be an integer between ${minimum} and ${maximum}`,
     );
   }
-  if (
-    fallback.requireSafeReplay !== undefined
-    && typeof fallback.requireSafeReplay !== 'boolean'
-  ) {
+  return value;
+}
+
+function requirePlainRecord(
+  value: unknown,
+  fieldName: string,
+  code: ConfigurationErrorCode = 'INVALID_CONFIGURATION',
+  provider?: ProviderId,
+): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new ProviderConfigurationError(
-      'INVALID_FALLBACK_POLICY',
-      `${fieldName}.requireSafeReplay must be a boolean`,
+      code,
+      `${fieldName} must be a non-null object`,
+      provider,
     );
   }
+
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new ProviderConfigurationError(
+      code,
+      `${fieldName} must be a plain object`,
+      provider,
+    );
+  }
+
+  return value as Record<string, unknown>;
 }
 
 function firstDefined<T>(values: Array<T | undefined>): T | undefined {

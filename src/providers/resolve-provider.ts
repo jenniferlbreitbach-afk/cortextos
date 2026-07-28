@@ -1,16 +1,18 @@
 import {
   DEFAULT_PROVIDER_ID,
   ProviderConfigurationError,
+  missingFallbackModelError,
   missingModelError,
   normalizeFallbackPolicy,
   normalizeRetryPolicy,
   normalizeTimeout,
-  validateGlobalProviderConfiguration,
-  validateProviderScope,
+  validateProviderResolutionInput,
 } from './config.js';
 import type {
+  FallbackPolicy,
   ProviderId,
   ProviderModelConfiguration,
+  ProviderModelMap,
   ProviderResolutionInput,
   ProviderSelectionSource,
   ResolvedProviderConfiguration,
@@ -24,10 +26,15 @@ import type {
  */
 export function resolveProviderConfiguration(
   input: ProviderResolutionInput,
+): ResolvedProviderConfiguration;
+export function resolveProviderConfiguration(
+  input: unknown,
+): ResolvedProviderConfiguration;
+export function resolveProviderConfiguration(
+  input: unknown,
 ): ResolvedProviderConfiguration {
-  const routine = validateProviderScope(input.routine, 'routine');
-  const agent = validateProviderScope(input.agent, 'agent');
-  const global = validateGlobalProviderConfiguration(input.global);
+  const validatedInput = validateProviderResolutionInput(input);
+  const { routine, agent, global, legacyModel } = validatedInput;
 
   const selection = selectProvider(
     routine?.provider,
@@ -40,7 +47,7 @@ export function resolveProviderConfiguration(
     routine?.models?.[selection.provider],
     agent?.models?.[selection.provider],
     global?.models?.[selection.provider],
-    selection.source === 'legacy' ? input.legacyModel : undefined,
+    selection.provider === 'anthropic' ? legacyModel : undefined,
   );
 
   if (selection.source !== 'legacy' && modelSelection.model === undefined) {
@@ -53,12 +60,26 @@ export function resolveProviderConfiguration(
     routine?.fallback,
   );
 
-  if (fallback.enabled && fallback.provider === selection.provider) {
-    throw new ProviderConfigurationError(
-      'INVALID_FALLBACK_POLICY',
-      `Fallback provider must differ from selected provider "${selection.provider}"`,
-      selection.provider,
-    );
+  const resolvedFallback = resolveFallback(
+    fallback,
+    selection.provider,
+    routine?.models,
+    agent?.models,
+    global?.models,
+    legacyModel,
+  );
+
+  if (selection.source === 'legacy' && modelSelection.model === undefined) {
+    return {
+      provider: selection.provider,
+      model: modelSelection.model,
+      selectionSource: selection.source,
+      modelSource: modelSelection.source,
+      timeout: normalizeTimeout(routine?.timeout, agent?.timeout, global?.timeout),
+      retry: normalizeRetryPolicy(global?.retry, agent?.retry, routine?.retry),
+      fallback: resolvedFallback,
+      usesProviderDefaultModel: true,
+    };
   }
 
   return {
@@ -68,9 +89,8 @@ export function resolveProviderConfiguration(
     modelSource: modelSelection.source,
     timeout: normalizeTimeout(routine?.timeout, agent?.timeout, global?.timeout),
     retry: normalizeRetryPolicy(global?.retry, agent?.retry, routine?.retry),
-    fallback,
-    usesProviderDefaultModel:
-      selection.source === 'legacy' && modelSelection.model === undefined,
+    fallback: resolvedFallback,
+    usesProviderDefaultModel: false,
   };
 }
 
@@ -99,13 +119,13 @@ function selectModel(
   legacyModel: string | undefined,
 ): { model?: string; source?: ProviderSelectionSource } {
   if (routineModel !== undefined) {
-    return { model: routineModel.model, source: 'routine' };
+    return { model: routineModel.model.trim(), source: 'routine' };
   }
   if (agentModel !== undefined) {
-    return { model: agentModel.model, source: 'agent' };
+    return { model: agentModel.model.trim(), source: 'agent' };
   }
   if (globalModel !== undefined) {
-    return { model: globalModel.model, source: 'global' };
+    return { model: globalModel.model.trim(), source: 'global' };
   }
   if (legacyModel !== undefined) {
     const normalized = legacyModel.trim();
@@ -114,4 +134,43 @@ function selectModel(
     }
   }
   return {};
+}
+
+function resolveFallback(
+  fallback: FallbackPolicy,
+  primaryProvider: ProviderId,
+  routineModels: ProviderModelMap | undefined,
+  agentModels: ProviderModelMap | undefined,
+  globalModels: ProviderModelMap | undefined,
+  legacyModel: string | undefined,
+): FallbackPolicy {
+  if (!fallback.enabled || fallback.provider === undefined) {
+    return fallback;
+  }
+
+  if (fallback.provider === primaryProvider) {
+    throw new ProviderConfigurationError(
+      'INVALID_FALLBACK_POLICY',
+      `Fallback provider must differ from selected provider "${primaryProvider}"`,
+      primaryProvider,
+    );
+  }
+
+  const modelSelection = selectModel(
+    fallback.provider,
+    routineModels?.[fallback.provider],
+    agentModels?.[fallback.provider],
+    globalModels?.[fallback.provider],
+    fallback.provider === 'anthropic' ? legacyModel : undefined,
+  );
+  if (modelSelection.model === undefined) {
+    throw missingFallbackModelError(fallback.provider);
+  }
+
+  return {
+    ...fallback,
+    model: modelSelection.model,
+    modelSource: modelSelection.source,
+    on: [...fallback.on],
+  };
 }

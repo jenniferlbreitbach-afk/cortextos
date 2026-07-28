@@ -35,7 +35,7 @@ export interface ProviderRetryPolicy {
   initialDelayMs: number;
   maxDelayMs: number;
   backoffMultiplier: number;
-  retryableCategories: ProviderErrorCategory[];
+  retryableCategories: readonly ProviderErrorCategory[];
 }
 
 export interface ProviderRetryPolicyOverride {
@@ -43,13 +43,23 @@ export interface ProviderRetryPolicyOverride {
   initialDelayMs?: number;
   maxDelayMs?: number;
   backoffMultiplier?: number;
-  retryableCategories?: ProviderErrorCategory[];
+  retryableCategories?: readonly ProviderErrorCategory[];
+}
+
+export interface FallbackPolicyOverride {
+  enabled?: boolean;
+  provider?: ProviderId;
+  on?: readonly ProviderErrorCategory[];
+  maxAttempts?: number;
+  requireSafeReplay?: boolean;
 }
 
 export interface FallbackPolicy {
   enabled: boolean;
   provider?: ProviderId;
-  on: ProviderErrorCategory[];
+  model?: string;
+  modelSource?: ProviderSelectionSource;
+  on: readonly ProviderErrorCategory[];
   maxAttempts: number;
   requireSafeReplay: boolean;
 }
@@ -62,7 +72,7 @@ export interface ProviderScopeConfiguration {
   models?: ProviderModelMap;
   timeout?: ProviderTimeout;
   retry?: ProviderRetryPolicyOverride;
-  fallback?: Partial<FallbackPolicy>;
+  fallback?: FallbackPolicyOverride;
 }
 
 export interface GlobalProviderConfiguration
