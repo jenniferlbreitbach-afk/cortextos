@@ -188,10 +188,12 @@ export class FastChecker {
 
     // Process queued Telegram messages
     let hasTelegramMessage = false;
+    let telegramCount = 0;
     while (this.telegramMessages.length > 0) {
       const msg = this.telegramMessages.shift()!;
       messageBlock += msg.formatted;
       hasTelegramMessage = true;
+      telegramCount++;
     }
 
     // Check agent inbox
@@ -203,7 +205,34 @@ export class FastChecker {
 
     // Inject if there's anything
     if (messageBlock) {
-      const injected = this.agent.injectMessage(messageBlock);
+      // Attribution only: pre-existing message ids, counts, and a source label.
+      // Nothing here is derived from message content.
+      //
+      // MIXED BATCHES: one PTY write is one model turn, so it produces exactly
+      // one ledger record. A batch can carry both Telegram and inbox messages;
+      // labelling it with either single source would hide the other's usage, so
+      // it is recorded as `mixed` with the full `messageCount`. Splitting into
+      // one record per message would misrepresent the turn count, which is the
+      // quantity that actually costs tokens.
+      const hasInboxMessage = ackIds.length > 0;
+      const source = hasTelegramMessage && hasInboxMessage
+        ? 'mixed'
+        : hasTelegramMessage ? 'telegram' : 'bus';
+      const purpose = hasTelegramMessage && hasInboxMessage
+        ? 'mixed-delivery'
+        : hasTelegramMessage ? 'telegram-message' : 'inbox-delivery';
+
+      const injected = this.agent.injectMessage(messageBlock, {
+        source,
+        purpose,
+        // Bus message ids are pre-existing opaque identifiers
+        // (`epochMs-from-rand`). Telegram messages carry no id at this layer,
+        // so a Telegram-only batch records null rather than a manufactured id.
+        requestId: hasInboxMessage
+          ? (ackIds.length === 1 ? ackIds[0] : `${ackIds[0]}+${ackIds.length - 1}`)
+          : null,
+        messageCount: telegramCount + ackIds.length,
+      });
       if (injected) {
         // ACK inbox messages
         for (const id of ackIds) {
@@ -878,7 +907,10 @@ Reply using: cortextos bus send-telegram -- ${chatId} '<your reply>'
         // Inject the urgent message
         if (content) {
           const urgentMsg = `=== URGENT SIGNAL ===\n\`\`\`\n${content}\n\`\`\`\n\n`;
-          this.agent.injectMessage(urgentMsg);
+          this.agent.injectMessage(urgentMsg, {
+            source: 'bus',
+            purpose: 'urgent-signal',
+          });
         }
       } catch (err) {
         this.log(`Error processing urgent signal: ${err}`);
@@ -988,7 +1020,10 @@ Reply using: cortextos bus send-telegram -- ${chatId} '<your reply>'
       this.ctxWarningFiredAt = now;
       const pctRound = Math.round(effectivePct);
       const statusSuffix = effectivePct >= handoff ? 'Handoff in progress.' : `Handoff triggers at ${handoff}%.`;
-      this.agent.injectMessage(`[CONTEXT] Window at ${pctRound}%. ${statusSuffix}`);
+      this.agent.injectMessage(`[CONTEXT] Window at ${pctRound}%. ${statusSuffix}`, {
+        source: 'handoff',
+        purpose: 'context-warning',
+      });
       this.log(`Context warning fired at ${pctRound}%`);
     }
 
@@ -1003,7 +1038,10 @@ Reply using: cortextos bus send-telegram -- ${chatId} '<your reply>'
       } catch { /* non-fatal */ }
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z';
       const handoffPrompt = `[CONTEXT HANDOFF REQUIRED] Context is at ${Math.round(effectivePct)}%. Write a handoff document to memory/handoffs/handoff-${ts}.md with these sections: ## Current Tasks, ## Next Actions, ## Active Crons, ## Key Context, ## Files Modified This Session. Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(effectivePct)}%" --handoff-doc <absolute path to the handoff doc you just wrote>. Do this NOW before the context window is exhausted.`;
-      this.agent.injectMessage(handoffPrompt);
+      this.agent.injectMessage(handoffPrompt, {
+        source: 'handoff',
+        purpose: 'context-handoff',
+      });
       this.log(`Handoff prompt injected at ${Math.round(effectivePct)}%`);
       // Pre-arm .force-fresh so the next restart is always a clean fresh session.
       // If the agent cooperates and calls hard-restart, it also writes .force-fresh — no-op.

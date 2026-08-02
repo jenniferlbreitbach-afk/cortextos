@@ -6,6 +6,8 @@ import { AgentProcess } from './agent-process.js';
 import { WorkerProcess } from './worker-process.js';
 import { FastChecker } from './fast-checker.js';
 import { CronScheduler } from './cron-scheduler.js';
+import { recordAttempt, type InjectionMeta } from '../bus/usage-ledger.js';
+import { measurePayload } from '../bus/payload-metadata.js';
 import { migrateCronsForAgent } from './cron-migration.js';
 import type { CronDefinition } from '../types/index.js';
 import { TelegramAPI } from '../telegram/api.js';
@@ -1083,10 +1085,10 @@ export class AgentManager {
   /**
    * Inject text into a running worker's PTY (nudge / stuck-state recovery).
    */
-  injectWorker(name: string, text: string): boolean {
+  injectWorker(name: string, text: string, meta?: InjectionMeta): boolean {
     const worker = this.workers.get(name);
     if (!worker) return false;
-    return worker.inject(text);
+    return worker.inject(text, meta);
   }
 
   /**
@@ -1094,8 +1096,8 @@ export class AgentManager {
    * Used by `cortextos bus test-cron-fire` to fire a cron immediately for testing.
    * Returns true if the agent is running and the inject succeeded; false otherwise.
    */
-  injectAgent(agentName: string, text: string): boolean {
-    return this.injectAgentDetailed(agentName, text).ok;
+  injectAgent(agentName: string, text: string, meta?: InjectionMeta): boolean {
+    return this.injectAgentDetailed(agentName, text, meta).ok;
   }
 
   /**
@@ -1106,12 +1108,28 @@ export class AgentManager {
    * boolean-returning `injectAgent()` is preserved for callers (cron
    * scheduler, fast-checker, fire-cron) that only need pass/fail.
    */
-  injectAgentDetailed(agentName: string, text: string): { ok: true } | { ok: false; code: 'NOT_FOUND' | 'NOT_RUNNING' | 'DEDUPED'; message: string } {
+  injectAgentDetailed(agentName: string, text: string, meta?: InjectionMeta): { ok: true } | { ok: false; code: 'NOT_FOUND' | 'NOT_RUNNING' | 'DEDUPED'; message: string } {
     const entry = this.agents.get(agentName);
     if (!entry) {
+      // No AgentProcess exists, so there is no per-agent ledger writer to call.
+      // Record here instead, otherwise NOT_FOUND rejections would be the one
+      // decision class missing from the ledger.
+      try {
+        recordAttempt({
+          agent: agentName,
+          actor: 'agent',
+          workspace: null,
+          result: 'rejected',
+          rejectionReason: 'not_found',
+          // Reduced to safe metadata here; raw content never enters the ledger.
+          payload: measurePayload(text, meta?.messageCount),
+          meta,
+          ctxRoot: this.ctxRoot,
+        });
+      } catch { /* ledger must never affect dispatch */ }
       return { ok: false, code: 'NOT_FOUND', message: `agent "${agentName}" not in registry` };
     }
-    return entry.process.injectMessageDetailed(text);
+    return entry.process.injectMessageDetailed(text, meta);
   }
 
   /**
@@ -1193,7 +1211,12 @@ export class AgentManager {
       // dedup-rejected and treated as a dispatch failure.
       const firedAt = new Date().toISOString();
       const injection = `[CRON FIRED ${firedAt}] ${cron.name}: ${prompt}`;
-      const injected = this.injectAgent(agentName, injection);
+      const injected = this.injectAgent(agentName, injection, {
+        source: 'cron',
+        purpose: 'cron-fire',
+        // Identifier only — the cron name plus its fire timestamp. Never the prompt.
+        requestId: `${cron.name}@${firedAt}`,
+      });
       if (!injected) {
         throw new Error(`injectAgent returned false for agent "${agentName}" — agent may not be running`);
       }

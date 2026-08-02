@@ -725,7 +725,10 @@ export class IPCServer {
           if (!injectName || !injectText) {
             response = { success: false, error: 'inject-worker requires: name, text' };
           } else {
-            const ok = this.agentManager.injectWorker(injectName, injectText);
+            const ok = this.agentManager.injectWorker(injectName, injectText, {
+              source: 'ipc',
+              purpose: 'worker-inject',
+            });
             response = ok
               ? { success: true, data: `Injected into worker ${injectName}` }
               : { success: false, error: `Worker ${injectName} not found or not running` };
@@ -744,7 +747,10 @@ export class IPCServer {
             // collision in MessageDedup window). Closes the conflation Boris
             // surfaced — the harness "3 not found errors" were dedup hits.
             // See issue #346.
-            const result = this.agentManager.injectAgentDetailed(agentToInject, textToInject);
+            const result = this.agentManager.injectAgentDetailed(agentToInject, textToInject, {
+              source: 'ipc',
+              purpose: 'operator-inject',
+            });
             if (result.ok) {
               response = { success: true, data: `Injected into agent ${agentToInject}` };
             } else {

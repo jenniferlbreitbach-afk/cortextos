@@ -3,6 +3,8 @@ import { mkdirSync } from 'fs';
 import type { CtxEnv, WorkerStatus, WorkerStatusValue } from '../types/index.js';
 import { AgentPTY } from '../pty/agent-pty.js';
 import { injectMessage } from '../pty/inject.js';
+import { recordAttempt, type InjectionMeta } from '../bus/usage-ledger.js';
+import { measurePayload } from '../bus/payload-metadata.js';
 
 /**
  * WorkerProcess — ephemeral Claude Code session for parallelized tasks.
@@ -26,6 +28,9 @@ export class WorkerProcess {
   private exitCode: number | undefined;
   private onDoneCallback: ((name: string, exitCode: number) => void) | null = null;
   private log: (msg: string) => void;
+  // Retained from spawn() purely so usage-ledger records can be attributed.
+  private env: CtxEnv | null = null;
+  private model: string | null = null;
 
   constructor(
     name: string,
@@ -44,6 +49,10 @@ export class WorkerProcess {
    * Spawn the worker Claude Code session with the given task prompt.
    */
   async spawn(env: CtxEnv, prompt: string, config: { model?: string } = {}): Promise<void> {
+    this.env = env;
+    this.model = config.model ?? null;
+    const spawnStartedAt = Date.now();
+
     // Ensure bus dirs exist so the worker can use cortextos bus commands
     try {
       mkdirSync(join(env.ctxRoot, 'inbox', this.name), { recursive: true });
@@ -67,6 +76,15 @@ export class WorkerProcess {
     await this.pty.spawn('fresh', prompt);
     this.status = 'running';
     this.log(`Running (pid: ${this.pty.getPid()}, dir: ${this.dir})`);
+
+    // The worker's task prompt is a model turn — record it like any other.
+    this.ledger(
+      prompt,
+      { source: 'worker', purpose: 'boot', requestId: `worker-spawn@${new Date().toISOString()}` },
+      'dispatched',
+      null,
+      spawnStartedAt,
+    );
   }
 
   /**
@@ -88,10 +106,44 @@ export class WorkerProcess {
    * Inject text into the worker's PTY (equivalent to tmux send-keys).
    * Use to nudge a stuck worker without restarting it.
    */
-  inject(text: string): boolean {
-    if (!this.pty || this.status !== 'running') return false;
+  inject(text: string, meta?: InjectionMeta): boolean {
+    const startedAt = Date.now();
+    if (!this.pty || this.status !== 'running') {
+      this.ledger(text, meta, 'rejected', 'not_running', startedAt);
+      return false;
+    }
     injectMessage((data) => this.pty?.write(data), text);
+    this.ledger(text, meta, 'dispatched', null, startedAt);
     return true;
+  }
+
+  /**
+   * Append one usage-ledger record. Runs after the decision is made and can
+   * never influence it. See AgentProcess.ledger for the full rationale.
+   */
+  private ledger(
+    content: string,
+    meta: InjectionMeta | undefined,
+    result: 'dispatched' | 'rejected',
+    rejectionReason: 'not_running' | null,
+    startedAt: number,
+  ): void {
+    try {
+      recordAttempt({
+        agent: this.name,
+        actor: 'worker',
+        workspace: this.env?.org || null,
+        runtime: 'claude-code',
+        model: this.model,
+        result,
+        rejectionReason,
+        // Reduced to safe metadata here; raw content never enters the ledger.
+        payload: measurePayload(content, meta?.messageCount),
+        latencyMs: Date.now() - startedAt,
+        meta: { source: 'worker', ...meta },
+        ctxRoot: this.env?.ctxRoot,
+      });
+    } catch { /* ledger must never affect worker operation */ }
   }
 
   /**

@@ -39,6 +39,16 @@ vi.mock('../../../src/bus/reminders.js', () => ({
   getOverdueReminders: vi.fn().mockReturnValue([]),
 }));
 
+// The usage ledger is an unrelated collaborator here: it appends its own JSONL
+// line on every injection decision (including the boot prompt on start()),
+// which would otherwise show up in the shared `fsMocks.appendFileSync` call
+// list and break the restarts.log assertions below. Ledger behaviour has its
+// own coverage in tests/unit/bus/usage-ledger.test.ts and
+// tests/unit/daemon/inject-ledger.test.ts.
+vi.mock('../../../src/bus/usage-ledger.js', () => ({
+  recordAttempt: vi.fn(),
+}));
+
 vi.mock('../../../src/utils/paths.js', () => ({
   resolvePaths: vi.fn().mockReturnValue({ stateDir: '/tmp/test-ctx/state/alice' }),
 }));

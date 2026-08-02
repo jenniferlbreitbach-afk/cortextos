@@ -6,6 +6,8 @@ import { AgentPTY } from '../pty/agent-pty.js';
 import { CodexAppServerPTY } from '../pty/codex-app-server-pty.js';
 import { HermesPTY, hermesDbExists } from '../pty/hermes-pty.js';
 import { MessageDedup, injectMessage } from '../pty/inject.js';
+import { recordAttempt, type InjectionMeta } from '../bus/usage-ledger.js';
+import { measurePayload } from '../bus/payload-metadata.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { ensureDir } from '../utils/atomic.js';
 import { writeCortextosEnv } from '../utils/env.js';
@@ -166,6 +168,7 @@ export class AgentProcess {
       this.resolveExit = null;
     });
 
+    const spawnStartedAt = Date.now();
     try {
       await this.pty.spawn(mode, prompt);
       // Codex exec-per-turn race: the new PTY's onExit can fire BEFORE this
@@ -181,6 +184,17 @@ export class AgentProcess {
       this.status = 'running';
       this.sessionStart = new Date();
       this.log(`Running (pid: ${this.pty.getPid()})`);
+
+      // A spawn IS a model turn: the boot prompt is submitted, and in
+      // `continue` mode the retained conversation is reloaded with it. Omitting
+      // it would understate spend on exactly the path that costs the most.
+      this.ledger(
+        prompt,
+        { source: 'restart', purpose: 'boot', requestId: `${mode}@${new Date().toISOString()}` },
+        'dispatched',
+        null,
+        spawnStartedAt,
+      );
 
       // Issue #392: codex-app-server does not reliably execute the inline
       // "Send a Telegram message saying you are back online" instruction the
@@ -329,17 +343,22 @@ export class AgentProcess {
    * See issue #346 — both used to surface as a bare `false` and got mistaken
    * for "agent not found" by operators investigating restart/cron failures.
    */
-  injectMessageDetailed(content: string): { ok: true } | { ok: false; code: 'NOT_RUNNING' | 'DEDUPED'; message: string } {
+  injectMessageDetailed(content: string, meta?: InjectionMeta): { ok: true } | { ok: false; code: 'NOT_RUNNING' | 'DEDUPED'; message: string } {
+    const startedAt = Date.now();
+
     if (!this.pty || this.status !== 'running') {
+      this.ledger(content, meta, 'rejected', 'not_running', startedAt);
       return { ok: false, code: 'NOT_RUNNING', message: `agent "${this.name}" is registered but not running (status: ${this.status})` };
     }
 
     if (this.dedup.isDuplicate(content)) {
       this.log('Dedup: skipping duplicate message');
+      this.ledger(content, meta, 'rejected', 'deduped', startedAt);
       return { ok: false, code: 'DEDUPED', message: `inject for "${this.name}" deduped — content matches MessageDedup hash window` };
     }
 
     injectMessage((data) => this.pty?.write(data), content);
+    this.ledger(content, meta, 'dispatched', null, startedAt);
     return { ok: true };
   }
 
@@ -348,8 +367,44 @@ export class AgentProcess {
    * New callers that need to distinguish DEDUPED from NOT_RUNNING should use
    * `injectMessageDetailed()` instead.
    */
-  injectMessage(content: string): boolean {
-    return this.injectMessageDetailed(content).ok;
+  injectMessage(content: string, meta?: InjectionMeta): boolean {
+    return this.injectMessageDetailed(content, meta).ok;
+  }
+
+  /**
+   * Append one usage-ledger record for an injection decision.
+   *
+   * Called only AFTER the decision has been made and acted on, so it cannot
+   * influence the outcome. `recordAttempt` itself never throws; the extra
+   * try/catch here guards the argument marshalling (e.g. a getter on a config
+   * object) so no ledger concern can ever reach the injection path.
+   *
+   * `content` is reduced to content-free measurement (UTF-8 byte count and, if
+   * known, a message count) HERE. The raw string never crosses into the ledger
+   * module, and nothing derived from it is stored.
+   */
+  private ledger(
+    content: string,
+    meta: InjectionMeta | undefined,
+    result: 'dispatched' | 'rejected',
+    rejectionReason: 'not_running' | 'deduped' | null,
+    startedAt: number,
+  ): void {
+    try {
+      recordAttempt({
+        agent: this.name,
+        actor: 'agent',
+        workspace: this.env.org || null,
+        runtime: this.config.runtime ?? 'claude-code',
+        model: this.config.model ?? null,
+        result,
+        rejectionReason,
+        payload: measurePayload(content, meta?.messageCount),
+        latencyMs: Date.now() - startedAt,
+        meta,
+        ctxRoot: this.env.ctxRoot,
+      });
+    } catch { /* ledger must never affect agent operation */ }
   }
 
   /**

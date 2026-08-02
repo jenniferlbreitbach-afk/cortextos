@@ -26,6 +26,8 @@ import { spawnWorkerCommand, terminateWorkerCommand, listWorkersCommand, injectW
 import { importAgentCommand } from './import-agent.js';
 import { updateCommand } from './update.js';
 import { providerSmokeCommand } from './provider-smoke.js';
+import { healthCommand } from './health.js';
+import { usageCommand } from './usage.js';
 
 const program = new Command();
 
@@ -62,6 +64,8 @@ program.addCommand(injectWorkerCommand);
 program.addCommand(importAgentCommand);
 program.addCommand(updateCommand);
 program.addCommand(providerSmokeCommand);
+program.addCommand(healthCommand);
+program.addCommand(usageCommand);
 
 // crash-alert: SessionEnd hook — cross-platform replacement for crash-alert.sh
 const crashAlertCommand = new Command('crash-alert')
