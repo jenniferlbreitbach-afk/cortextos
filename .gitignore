@@ -44,7 +44,7 @@ knowledge-base/scripts/_test_clients/__pycache__/
 tests/playwright/dashboard-ui.spec.ts
 
 # Local ops docs (personal, not for public repo)
-docs/
+docs/*
 
 # Internal developer/planning notes (not for public repo)
 KNOWN-ISSUES.md
@@ -67,3 +67,15 @@ WINDOWS_INSTALL_REPORT.md
 *INSTALL_REPORT.md
 /PHASE*-REPORT.md
 docs/phase-reports/
+
+# Shared provider-neutral twin operating guide; keep all other operations docs private.
+!docs/README.md
+!docs/operations/
+docs/operations/*
+!docs/operations/PORTABLE-TWIN-OPERATING-GUIDE.md
+!docs/operations/adapters/
+docs/operations/adapters/*
+!docs/operations/adapters/chatgpt.md
+!docs/operations/adapters/claude.md
+!docs/operations/adapters/codex.md
+!docs/operations/adapters/grok.md
