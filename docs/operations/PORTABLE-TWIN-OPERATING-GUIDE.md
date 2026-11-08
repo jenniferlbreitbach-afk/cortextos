@@ -12,7 +12,7 @@
 
 ### Verified in this session
 
-- CLI command names/options in the read-only and state-changing examples were checked against current `cortextos --help` output on 2026-11-08 at about 2:15 AM MT. The documented names and options matched; this verifies CLI syntax, not whether an operation is safe in a particular task.
+- The first CLI help check was made in a different checkout, so the publication branch's source is authoritative. Rechecking this branch on 2026-11-08 found that `cortextos health --json` is not registered; that example was removed. Top-level `status` and `list-agents` registrations are present (`src/cli/index.ts:8-48`; `src/cli/status.ts:8-18`; `src/cli/list-agents.ts:6-13`). `doctor` is not listed as read-only because its implementation can repair spawn-helper permissions (`src/cli/doctor.ts:85-115`).
 - Source review found `cortextos bus check-inbox` is state-changing, not read-only: it creates inbox/inflight directories and a lock, recovers stale inflight messages, moves read messages to inflight, and quarantines invalid/corrupt messages under `.errors` (`src/cli/bus.ts:125-132`; `src/bus/message.ts:90-163`). It is classified accordingly below.
 - `cortextos bus list-crons <agent>` computes a derived `Next Fire` value in its text table; `--json` returns saved definitions plus the merged last-fire value, without the derived next-fire value. The text table reports enabled state as `yes` or `no` (`src/cli/bus.ts:2003-2082`).
 - `src/bus/message.ts` shows that bus HMAC signing and verification use the same shared context key; a valid HMAC does not identify a particular agent author. No key material was read.
@@ -44,13 +44,12 @@ This guide explains how a twin finds its authority and operates through the Cort
 1. Confirm the registered agent name and organization from the session/runtime configuration. Do not guess identity from a chat title or folder name.
 2. Read the agent's `IDENTITY.md`, `GOALS.md`, `GUARDRAILS.md`, `CAPABILITIES.md` when present, and `TWIN-OPERATING-PROFILE.md`.
 3. Read the linked authoritative handoff, newest relevant memory/checkpoint, and task record. Treat dates and status labels as claims until checked against their source.
-4. Check health and schedules with read-only commands before reporting readiness:
+4. Check runtime status and schedules with read-only commands before reporting readiness:
 
    ```powershell
    # Use only the identity already assigned to this session.
    $env:CTX_AGENT_NAME = '<registered-agent>'
    $env:CTX_ORG = '<organization>'
-   cortextos health --json
    cortextos status
    cortextos bus list-crons <agent>
    cortextos bus list-crons <agent> --json
@@ -84,7 +83,6 @@ This guide explains how a twin finds its authority and operates through the Cort
 These commands inspect the current system and do not start an agent or inject a prompt:
 
 ```powershell
-cortextos health [--json]
 cortextos status
 cortextos list-agents [--org <org>] [--format json]
 cortextos bus list-crons <agent> [--json]
