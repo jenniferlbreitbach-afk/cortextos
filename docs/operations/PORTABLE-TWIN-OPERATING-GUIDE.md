@@ -12,7 +12,8 @@
 
 ### Verified in this session
 
-- The first CLI help check was made in a different checkout, so the publication branch's source is authoritative. Rechecking this branch on 2026-11-08 found that `cortextos health --json` is not registered; that example was removed. Top-level `status` and `list-agents` registrations are present (`src/cli/index.ts:8-48`; `src/cli/status.ts:8-18`; `src/cli/list-agents.ts:6-13`). `doctor` is not listed as read-only because its implementation can repair spawn-helper permissions (`src/cli/doctor.ts:85-115`).
+- The first CLI help check was made in a different checkout, so the publication branch's source is authoritative. A static comparison found all 28 bus command names in this guide registered by the current `src/cli/bus.ts:72-2711`; top-level `status` and `list-agents` registrations are present (`src/cli/index.ts:8-48`; `src/cli/status.ts:8-18`; `src/cli/list-agents.ts:6-13`). Rechecking this branch found unsupported `cortextos health --json`, `check-execution-assurance`, task-comment, property-note, project-progress, backlog-cleanup, and restore-archived-task examples, plus unsupported `--no-telegram`, `--review-date`, and `--no-review-intended` options; they were removed. `doctor` is not listed as read-only because its implementation can repair spawn-helper permissions (`src/cli/doctor.ts:85-115`).
+- `bus update-approval` has a help-string mismatch: the description says “approved or denied,” while the implementation accepts `approved` or `rejected`; the example uses the validated values (`src/cli/bus.ts:1118-1128`).
 - Source review found `cortextos bus check-inbox` is state-changing, not read-only: it creates inbox/inflight directories and a lock, recovers stale inflight messages, moves read messages to inflight, and quarantines invalid/corrupt messages under `.errors` (`src/cli/bus.ts:125-132`; `src/bus/message.ts:90-163`). It is classified accordingly below.
 - `cortextos bus list-crons <agent>` computes a derived `Next Fire` value in its text table; `--json` returns saved definitions plus the merged last-fire value, without the derived next-fire value. The text table reports enabled state as `yes` or `no` (`src/cli/bus.ts:2003-2082`).
 - `src/bus/message.ts` shows that bus HMAC signing and verification use the same shared context key; a valid HMAC does not identify a particular agent author. No key material was read.
@@ -90,7 +91,6 @@ cortextos bus get-cron-log <agent> [<name>] [--json]
 cortextos bus list-tasks [--agent <agent>] [--status <status>]
 cortextos bus task-history <task-id>
 cortextos bus check-deps <task-id>
-cortextos bus check-execution-assurance
 cortextos bus check-stale-tasks
 cortextos bus check-human-tasks
 cortextos bus list-approvals
@@ -109,9 +109,9 @@ cortextos bus add-cron <agent> <name> <interval> <prompt...>
 cortextos bus update-cron <agent> <name> [options]
 cortextos bus remove-cron <agent> <name>
 cortextos bus test-cron-fire <agent> <name>
-cortextos bus send-message <to> <priority> [text]
+cortextos bus send-message <to> <priority> <text>
 cortextos bus check-inbox
-cortextos enable <agent> [--org <org>] [--no-telegram]
+cortextos enable <agent> [--org <org>]
 cortextos disable <agent>
 cortextos start [<agent>]
 cortextos stop <agent>
@@ -121,30 +121,23 @@ cortextos bus update-task <id> <status>
 cortextos bus claim-task <id>
 cortextos bus complete-task <id> --result <result>
 cortextos bus ack-inbox <message-id>
-cortextos bus task-comment <task-id> <message>
-cortextos bus property-note <property-id> <message>
 cortextos bus save-output <task-id> <source> [--label <label>]
-cortextos bus project-progress <task-id> [options]
 cortextos bus create-task <title> [options]
 cortextos bus log-event <category> <event> <severity>
 cortextos bus update-heartbeat <status>
 cortextos bus compact-tasks [options]
 cortextos bus archive-tasks [options]
-cortextos bus backlog-cleanup [options]
-cortextos bus restore-archived-task <taskId>
 cortextos bus create-approval <title> <category> [context]
 cortextos bus update-approval <id> <approved|rejected> [note]
 ```
 
-`test-cron-fire` injects the saved prompt into an agent and can cause real actions. It is not a harmless preview. `update-cron --enabled false` disables a cron but preserves its definition; `remove-cron` deletes the definition. Preserve holds, pause reasons, review dates, prompts, and schedules unless explicitly authorized to change them.
+`test-cron-fire` injects the saved prompt into an agent and can cause real actions. It is not a harmless preview. `create-approval` also publishes through the configured activity channel; `create-task` sends a bus message when assigned to a different agent. `update-cron --enabled false` disables a cron but preserves its definition; `remove-cron` deletes the definition. Preserve holds, pause reasons, prompts, and schedules unless explicitly authorized to change them.
 
 `check-inbox` consumes messages from the inbox into the inflight queue and can recover stale inflight messages or move invalid/corrupt messages into `.errors`. Do not treat it as a passive preview; use it only when the assigned task authorizes inbox processing. Acknowledging a message with `ack-inbox` is a separate action that moves it from inflight to processed.
 
-In `update-cron`, `--review-date` means “revisit this hold on that date”; it is not an auto-resume date. `--no-review-intended true` marks a condition-bound hold with no calendar end date. These fields describe the hold and do not themselves enable a cron.
-
 `enable` registers and starts an agent; `disable` stops and deregisters it. `start` starts the daemon and, when no agent is named, all eligible agents. `stop` requires an agent name or `--all` and stops agent processes; it does not stop the daemon.
 
-`task-comment`, `project-progress`, `create-task`, and `save-output` write to CortextOS records. `save-output --move` deletes the source after a successful copy; avoid that option unless deletion was explicitly authorized.
+`create-task` and `save-output` write to CortextOS records. `save-output --move` deletes the source after a successful copy; avoid that option unless deletion was explicitly authorized.
 
 This is the agent-operations command set, not an exhaustive list of every developer or administrator command. Treat unlisted commands as state-changing until their implementation or official CLI documentation proves otherwise. In particular, `send-message` communicates with another agent, `claim-task` changes task ownership/status, `update-heartbeat` writes health state, and task archive/cleanup commands alter task records.
 
