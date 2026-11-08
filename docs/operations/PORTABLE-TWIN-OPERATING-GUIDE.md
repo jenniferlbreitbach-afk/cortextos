@@ -100,6 +100,8 @@ cortextos bus recall-facts
 
 The health report is a measurement at its generated time. “Enabled” is configuration state; it does not by itself prove a live process, usable account access, successful run, or completed outcome.
 
+`cortextos list-agents` is the identity/heartbeat view. Its `running` indicator means a heartbeat was written within the last 10 minutes; it does not prove that the agent process is running. Use `cortextos status` for the daemon's live process table. Neither view proves that connected accounts work or that a routine completed successfully.
+
 ### State-changing operations
 
 The following commands change persistent state, agent processes, or execute work. Do not use them unless the human has authorized the exact action and scope:
